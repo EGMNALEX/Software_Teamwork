@@ -7,6 +7,9 @@ WHERE id = '33333333-3333-4333-8333-333333333601'::uuid
   AND alias = 'document'
   AND created_by_user_id = 'local-seed';
 
+DELETE FROM qa_config_knowledge_bases
+WHERE external_kb_id = 'kb_local_demo';
+
 DELETE FROM citations
 WHERE message_id IN (
       '33333333-3333-4333-8333-333333333401'::uuid,

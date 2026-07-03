@@ -204,7 +204,8 @@ psql "$POSTGRES_ADMIN_URL" \
   -v ON_ERROR_STOP=1 \
   -f "$ROOT_DIR/deploy/seeds/001-local-demo-seed.sql" \
   -f "$ROOT_DIR/deploy/seeds/002-ai-gateway-model-profiles.sql" \
-  -f "$ROOT_DIR/deploy/seeds/003-qa-document-mcp.sql"
+  -f "$ROOT_DIR/deploy/seeds/003-qa-document-mcp.sql" \
+  -f "$ROOT_DIR/deploy/seeds/004-qa-default-knowledge-base.sql"
 echo "local dev-up: ${CURRENT_STEP} succeeded"
 
 echo "infra, migrations, and seed are ready"

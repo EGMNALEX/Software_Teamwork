@@ -63,6 +63,14 @@ class LocalSeedContractTests(unittest.TestCase):
                 "INSERT INTO mcp_servers (alias) VALUES ('document') ON CONFLICT (alias) DO UPDATE;\n",
                 encoding="utf-8",
             )
+            (root / "deploy" / "seeds" / "004-qa-default-knowledge-base.sql").write_text(
+                "\\connect qa_system\n"
+                "INSERT INTO qa_config_knowledge_bases (config_id, external_kb_id)\n"
+                "SELECT id, 'kb_local_demo' FROM qa_config_versions\n"
+                "ON CONFLICT (config_id, external_kb_id) DO UPDATE;\n"
+                "Local Demo Knowledge Base\n",
+                encoding="utf-8",
+            )
             (root / "deploy" / "README.md").write_text(
                 "deploy/.env.example 是唯一默认配置来源\n"
                 "cp deploy/.env.example deploy/.env\n"
@@ -97,6 +105,7 @@ class LocalSeedContractTests(unittest.TestCase):
                 "001-local-demo-seed.sql\n"
                 "002-ai-gateway-model-profiles.sql\n"
                 "003-qa-document-mcp.sql\n"
+                "004-qa-default-knowledge-base.sql\n"
                 "--wait\n"
                 "--wait-timeout\n"
                 "initialize_qdrant_collection\n"

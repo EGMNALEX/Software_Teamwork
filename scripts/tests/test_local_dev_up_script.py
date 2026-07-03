@@ -85,6 +85,7 @@ class LocalDevUpScriptTests(unittest.TestCase):
             "001-local-demo-seed.sql",
             "002-ai-gateway-model-profiles.sql",
             "003-qa-document-mcp.sql",
+            "004-qa-default-knowledge-base.sql",
         ]:
             (root / "deploy" / "seeds" / seed).write_text("-- seed\n", encoding="utf-8")
         for service in ["auth", "file", "knowledge", "qa", "document", "ai-gateway"]:

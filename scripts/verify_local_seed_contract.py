@@ -12,6 +12,7 @@ from pathlib import Path
 SEED_001 = Path("deploy/seeds/001-local-demo-seed.sql")
 SEED_002 = Path("deploy/seeds/002-ai-gateway-model-profiles.sql")
 SEED_003 = Path("deploy/seeds/003-qa-document-mcp.sql")
+SEED_004 = Path("deploy/seeds/004-qa-default-knowledge-base.sql")
 CLEANUP_SEED = Path("deploy/seeds/099-local-demo-cleanup.sql")
 DEPLOY_README = Path("deploy/README.md")
 LOCAL_RUNBOOK = Path("docs/runbooks/local-integration.md")
@@ -78,6 +79,15 @@ REQUIRED_DOCUMENT_MCP_TOKENS = [
     "ON CONFLICT (alias) DO UPDATE",
 ]
 
+REQUIRED_QA_DEFAULT_KB_TOKENS = [
+    r"\\connect\s+qa_system",
+    "qa_config_knowledge_bases",
+    "qa_config_versions",
+    "kb_local_demo",
+    "Local Demo Knowledge Base",
+    "ON CONFLICT (config_id, external_kb_id) DO UPDATE",
+]
+
 FORBIDDEN_AI_TOKENS = [
     "host.docker.internal",
 ]
@@ -142,6 +152,7 @@ REQUIRED_DEV_UP_TOKENS = [
     "001-local-demo-seed.sql",
     "002-ai-gateway-model-profiles.sql",
     "003-qa-document-mcp.sql",
+    "004-qa-default-knowledge-base.sql",
     "--wait",
     "--wait-timeout",
     "initialize_qdrant_collection",
@@ -243,6 +254,7 @@ def verify_local_seed_contract(root: Path) -> list[str]:
     seed_001 = read_required(root, SEED_001, issues)
     seed_002 = read_required(root, SEED_002, issues)
     seed_003 = read_required(root, SEED_003, issues)
+    seed_004 = read_required(root, SEED_004, issues)
     cleanup_seed = read_required(root, CLEANUP_SEED, issues)
     auth_migrations = read_required_glob(root, AUTH_MIGRATIONS_DIR, "*.sql", issues)
     deploy_readme = read_required(root, DEPLOY_README, issues)
@@ -256,6 +268,7 @@ def verify_local_seed_contract(root: Path) -> list[str]:
     issues.extend(validate_seed_001(seed_001))
     issues.extend(validate_seed_002(seed_002))
     issues.extend(validate_seed_003(seed_003))
+    issues.extend(validate_seed_004(seed_004))
     issues.extend(validate_cleanup_seed(cleanup_seed))
     issues.extend(validate_auth_migrations(auth_migrations))
     issues.extend(
@@ -350,6 +363,19 @@ def validate_seed_003(content: str) -> list[str]:
     return issues
 
 
+def validate_seed_004(content: str) -> list[str]:
+    if not content:
+        return []
+    issues: list[str] = []
+    for token in REQUIRED_QA_DEFAULT_KB_TOKENS:
+        if token.startswith(r"\\connect"):
+            if not re.search(token, content):
+                issues.append(f"{SEED_004} missing database section matching `{token}`")
+        elif token not in content:
+            issues.append(f"{SEED_004} missing QA default knowledge base token `{token}`")
+    return issues
+
+
 def validate_cleanup_seed(content: str) -> list[str]:
     if not content:
         return []
@@ -361,10 +387,18 @@ def validate_cleanup_seed(content: str) -> list[str]:
         "22222222-2222-4222-8222-222222222301",
         "33333333-3333-4333-8333-333333333301",
         "33333333-3333-4333-8333-333333333601",
+        "kb_local_demo",
     ]:
         if token not in content:
             issues.append(f"{CLEANUP_SEED} missing cleanup token `{token}`")
-    for table in ["mcp_servers", "message_content_blocks", "report_section_versions", "document_chunks", "auth_credentials"]:
+    for table in [
+        "mcp_servers",
+        "qa_config_knowledge_bases",
+        "message_content_blocks",
+        "report_section_versions",
+        "document_chunks",
+        "auth_credentials",
+    ]:
         if table not in content:
             issues.append(f"{CLEANUP_SEED} missing cleanup table `{table}`")
     return issues
@@ -428,6 +462,7 @@ def validate_forbidden_content(root: Path) -> list[str]:
         SEED_001,
         SEED_002,
         SEED_003,
+        SEED_004,
         CLEANUP_SEED,
         DEPLOY_README,
         LOCAL_RUNBOOK,
