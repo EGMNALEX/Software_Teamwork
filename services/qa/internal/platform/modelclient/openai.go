@@ -153,7 +153,7 @@ func (c *Client) Complete(ctx context.Context, messages []agent.Message, tools [
 		return agent.Completion{}, normalizeGatewayError(response.StatusCode, response.Body)
 	}
 	if isEventStream(response.Header.Get("Content-Type")) {
-		return decodeStreamCompletion(response.Body)
+		return decodeStreamCompletion(ctx, response.Body)
 	}
 	limited := io.LimitReader(response.Body, maxResponseBytes+1)
 	data, err := io.ReadAll(limited)
@@ -228,9 +228,10 @@ func isEventStream(contentType string) bool {
 	return strings.Contains(strings.ToLower(contentType), "text/event-stream")
 }
 
-func decodeStreamCompletion(body io.Reader) (agent.Completion, error) {
+func decodeStreamCompletion(ctx context.Context, body io.Reader) (agent.Completion, error) {
 	message := agent.Message{Role: agent.RoleAssistant}
 	accumulator := newToolCallAccumulator()
+	reasoningObserver := agent.ReasoningDeltaObserverFromContext(ctx)
 	var finishReason string
 	var usage agent.TokenUsage
 	scanner := bufio.NewScanner(body)
@@ -263,6 +264,10 @@ func decodeStreamCompletion(body io.Reader) (agent.Completion, error) {
 				message.Role = choice.Delta.Role
 			}
 			message.Content += choice.Delta.Content
+			message.ReasoningContent += choice.Delta.ReasoningContent
+			if reasoningObserver != nil && choice.Delta.ReasoningContent != "" {
+				reasoningObserver(choice.Delta.ReasoningContent)
+			}
 			accumulator.apply(choice.Delta.ToolCalls)
 			if choice.FinishReason != "" {
 				finishReason = choice.FinishReason

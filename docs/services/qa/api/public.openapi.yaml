@@ -128,7 +128,7 @@ paths:
             text/event-stream:
               schema:
                 type: string
-                description: SSE stream. Events include message.created, agent.iteration.started, tool.started, tool.completed, tool.failed, reasoning.step, answer.delta, citation.delta, answer.completed, error, heartbeat.
+                description: SSE stream. Events include message.created, agent.iteration.started, tool.started, tool.completed, tool.failed, reasoning.step, optional reasoning.delta, answer.delta, citation.delta, answer.completed, error, heartbeat. reasoning.delta carries provider-supplied display-safe reasoning text only.
         default: { $ref: '#/components/responses/Error' }
   /qa-sessions/{sessionId}/attachments:
     parameters:
@@ -756,11 +756,24 @@ components:
         eventSeq: { type: integer }
         eventType:
           type: string
-          enum: [message.created, agent.iteration.started, reasoning.step, tool.started, tool.completed, tool.failed, answer.delta, citation.delta, answer.completed, error, heartbeat]
+          enum: [message.created, agent.iteration.started, reasoning.step, reasoning.delta, tool.started, tool.completed, tool.failed, answer.delta, citation.delta, answer.completed, error, heartbeat]
         payload:
           type: object
           additionalProperties: true
+          description: For reasoning.delta, payload shape is ReasoningDeltaPayload.
         createdAt: { type: string, format: date-time }
+    ReasoningDeltaPayload:
+      type: object
+      required: [responseRunId, messageId, iterationNo, text]
+      properties:
+        responseRunId: { type: string }
+        messageId: { type: string }
+        iterationNo: { type: integer, minimum: 1 }
+        text:
+          type: string
+          maxLength: 4096
+          description: Provider-supplied display-safe reasoning text; must not include prompts, private chain-of-thought, raw tool data, credentials, internal URLs, or provider raw errors.
+        index: { type: integer, minimum: 0 }
     StreamEventListResponse:
       type: object
       properties:

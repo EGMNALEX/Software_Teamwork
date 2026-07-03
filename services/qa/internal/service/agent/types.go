@@ -16,20 +16,25 @@ const (
 // agent loop. Tool calls are emitted by assistant messages; tool results are
 // appended as role=tool messages correlated by ToolCallID.
 type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Name       string     `json:"name,omitempty"`
+	Role             string     `json:"role"`
+	Content          string     `json:"content"`
+	ReasoningContent string     `json:"-"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
+	Name             string     `json:"name,omitempty"`
 }
 
 func (m *Message) UnmarshalJSON(data []byte) error {
 	var decoded struct {
-		Role       string     `json:"role"`
-		Content    *string    `json:"content"`
-		ToolCalls  []ToolCall `json:"tool_calls"`
-		ToolCallID string     `json:"tool_call_id"`
-		Name       string     `json:"name"`
+		Role              string          `json:"role"`
+		Content           *string         `json:"content"`
+		ReasoningContent  *string         `json:"reasoning_content"`
+		ReasoningContent2 *string         `json:"reasoningContent"`
+		ReasoningText     *string         `json:"reasoning_text"`
+		Reasoning         json.RawMessage `json:"reasoning"`
+		ToolCalls         []ToolCall      `json:"tool_calls"`
+		ToolCallID        string          `json:"tool_call_id"`
+		Name              string          `json:"name"`
 	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
@@ -40,10 +45,51 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	} else {
 		m.Content = ""
 	}
+	m.ReasoningContent = firstNonEmptyString(decoded.ReasoningContent, decoded.ReasoningContent2, decoded.ReasoningText)
+	if m.ReasoningContent == "" {
+		m.ReasoningContent = reasoningContentFromRaw(decoded.Reasoning)
+	}
 	m.ToolCalls = decoded.ToolCalls
 	m.ToolCallID = decoded.ToolCallID
 	m.Name = decoded.Name
 	return nil
+}
+
+func firstNonEmptyString(values ...*string) string {
+	for _, value := range values {
+		if value != nil && *value != "" {
+			return *value
+		}
+	}
+	return ""
+}
+
+func reasoningContentFromRaw(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text
+	}
+	var object struct {
+		Content string `json:"content"`
+		Text    string `json:"text"`
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return ""
+	}
+	return firstNonEmptyValue(object.Content, object.Text, object.Summary)
+}
+
+func firstNonEmptyValue(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 type ToolCall struct {
@@ -91,6 +137,22 @@ type ToolResult struct {
 
 type ModelClient interface {
 	Complete(ctx context.Context, messages []Message, tools []ToolDefinition) (Completion, error)
+}
+
+type ReasoningDeltaObserver func(delta string)
+
+type reasoningDeltaObserverKey struct{}
+
+func WithReasoningDeltaObserver(ctx context.Context, observer ReasoningDeltaObserver) context.Context {
+	if observer == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, reasoningDeltaObserverKey{}, observer)
+}
+
+func ReasoningDeltaObserverFromContext(ctx context.Context) ReasoningDeltaObserver {
+	observer, _ := ctx.Value(reasoningDeltaObserverKey{}).(ReasoningDeltaObserver)
+	return observer
 }
 
 // ToolClient is implemented by the MCP adapter. Keeping this interface at the

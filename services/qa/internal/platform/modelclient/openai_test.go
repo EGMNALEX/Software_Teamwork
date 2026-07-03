@@ -101,6 +101,66 @@ func TestCompleteSendsFunctionToolsAndParsesToolCalls(t *testing.T) {
 	}
 }
 
+func TestCompleteParsesReasoningContentWithoutSendingItBack(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request completionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if len(request.Messages) != 1 {
+			t.Fatalf("messages=%+v", request.Messages)
+		}
+		requestData, err := json.Marshal(request.Messages[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(requestData), "provider reasoning") || strings.Contains(string(requestData), "reasoning_content") {
+			t.Fatalf("request leaked reasoning content: %s", requestData)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+          "choices":[{"message":{"role":"assistant","content":"answer","reasoning_content":"provider reasoning summary"},"finish_reason":"stop"}],
+          "usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}
+        }`))
+	}))
+	defer server.Close()
+
+	client, err := New(Config{Endpoint: "http://localhost:8086/internal/v1/chat/completions", TokenHeader: "X-Service-Token", Model: "test", MaxTokens: 100, Timeout: time.Second, transport: newTestTransport(t, server.URL)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completion, err := client.Complete(context.Background(), []agent.Message{{Role: agent.RoleUser, Content: "hi", ReasoningContent: "provider reasoning must not be sent"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completion.Message.Content != "answer" || completion.Message.ReasoningContent != "provider reasoning summary" {
+		t.Fatalf("completion=%+v", completion.Message)
+	}
+}
+
+func TestCompleteParsesReasoningObjectContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+          "choices":[{"message":{"role":"assistant","content":"answer","reasoning":{"content":"object reasoning summary"}},"finish_reason":"stop"}],
+          "usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}
+        }`))
+	}))
+	defer server.Close()
+
+	client, err := New(Config{Endpoint: "http://localhost:8086/internal/v1/chat/completions", TokenHeader: "X-Service-Token", Model: "test", MaxTokens: 100, Timeout: time.Second, transport: newTestTransport(t, server.URL)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completion, err := client.Complete(context.Background(), []agent.Message{{Role: agent.RoleUser, Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completion.Message.ReasoningContent != "object reasoning summary" {
+		t.Fatalf("reasoning=%q", completion.Message.ReasoningContent)
+	}
+}
+
 func TestNewRejectsUntrustedAIGatewayEndpoint(t *testing.T) {
 	cases := []string{
 		"https://public.example.test/internal/v1/chat/completions",
@@ -250,6 +310,40 @@ data: [DONE]
 	}
 	if completion.Usage.PromptTokens != 7 || completion.Usage.CompletionTokens != 3 || completion.Usage.ReasoningTokens != 2 || completion.Usage.TotalTokens != 12 {
 		t.Fatalf("unexpected usage: %+v", completion.Usage)
+	}
+}
+
+func TestCompleteParsesStreamedReasoningDeltas(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request completionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if !request.Stream {
+			t.Fatal("stream = false, want true")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"first "},"finish_reason":null}]}
+data: {"choices":[{"index":0,"delta":{"reasoningContent":"second ","content":"answer"},"finish_reason":null}]}
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":5,"total_tokens":12,"completion_tokens_details":{"reasoning_tokens":2}}}
+data: [DONE]
+`))
+	}))
+	defer server.Close()
+
+	client, err := New(Config{Endpoint: "http://localhost:8086/internal/v1/chat/completions", TokenHeader: "X-Service-Token", Model: "test", MaxTokens: 100, Timeout: time.Second, Stream: true, transport: newTestTransport(t, server.URL)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completion, err := client.Complete(context.Background(), []agent.Message{{Role: agent.RoleUser, Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completion.Message.Content != "answer" {
+		t.Fatalf("content=%q", completion.Message.Content)
+	}
+	if completion.Message.ReasoningContent != "first second " {
+		t.Fatalf("reasoning=%q", completion.Message.ReasoningContent)
 	}
 }
 

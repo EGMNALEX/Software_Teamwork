@@ -32,6 +32,8 @@ const (
 	CodeTooLarge          Code = "too_large"
 )
 
+const maxReasoningDeltaBytes = 4096
+
 type AppError struct {
 	Code    Code
 	Message string
@@ -580,6 +582,16 @@ func (s *QAService) Ask(ctx context.Context, userID, conversationID string, inpu
 			if invocationID != "" {
 				modelInvocationIDs[event.Iteration] = invocationID
 			}
+		case agent.EventModelReasoning:
+			if text := publicReasoningDeltaText(event.ReasoningContent); text != "" {
+				emit("reasoning.delta", map[string]any{
+					"responseRunId": run.ID,
+					"messageId":     assistantMessage.ID,
+					"iterationNo":   event.Iteration,
+					"text":          text,
+					"index":         event.Iteration - 1,
+				})
+			}
 		case agent.EventToolStarted:
 			observation := toolObservations[event.ToolCallID]
 			emit("tool.started", toolProgressPayload("正在执行工具 "+event.ToolName, event, observation, modelInvocationIDs[event.Iteration], false))
@@ -940,6 +952,57 @@ func emitProgress(observer ProgressObserver, event ProgressEvent) {
 	if observer != nil {
 		observer(event)
 	}
+}
+
+func publicReasoningDeltaText(value string) string {
+	text := strings.TrimSpace(value)
+	if text == "" || containsUnsafeReasoningContent(text) {
+		return ""
+	}
+	return truncateUTF8WithSuffix(text, maxReasoningDeltaBytes, "\n...[reasoning truncated]")
+}
+
+func containsUnsafeReasoningContent(value string) bool {
+	normalized := strings.ToLower(value)
+	for _, marker := range []string{
+		"private_chain_of_thought",
+		"chain of thought",
+		"system prompt",
+		"raw mcp",
+		"tool arguments",
+		"api key",
+		"apikey",
+		"sk-",
+		"token=",
+		"bearer ",
+		"object key",
+		"objectkey",
+		"internal url",
+		"internalurl",
+		"http://internal",
+		"https://internal",
+		"provider raw",
+	} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func truncateUTF8WithSuffix(value string, maxBytes int, suffix string) string {
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value
+	}
+	limit := maxBytes - len(suffix)
+	if limit <= 0 {
+		limit = maxBytes
+		suffix = ""
+	}
+	for limit > 0 && !utf8.ValidString(value[:limit]) {
+		limit--
+	}
+	return value[:limit] + suffix
 }
 
 func newID(prefix string) string {

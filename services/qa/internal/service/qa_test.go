@@ -204,6 +204,22 @@ func (toolProgressRunner) RunWithToolResultCallback(ctx context.Context, input [
 	return toolProgressRunner{}.RunWithObserver(ctx, input, observer)
 }
 
+type reasoningDeltaRunner struct {
+	reasoning string
+}
+
+func (r reasoningDeltaRunner) RunWithObserver(_ context.Context, input []agent.Message, observer agent.Observer) (agent.Result, error) {
+	observer(agent.Event{Type: agent.EventModelStarted, Iteration: 1})
+	observer(agent.Event{Type: agent.EventModelReasoning, Iteration: 1, ReasoningContent: r.reasoning})
+	observer(agent.Event{Type: agent.EventModelCompleted, Iteration: 1, Usage: agent.TokenUsage{PromptTokens: 7, CompletionTokens: 4, ReasoningTokens: 3, TotalTokens: 14}})
+	final := agent.Message{Role: agent.RoleAssistant, Content: "reasoned answer", ReasoningContent: r.reasoning}
+	return agent.Result{Final: final, Messages: append(input, final), Iterations: 1}, nil
+}
+
+func (r reasoningDeltaRunner) RunWithToolResultCallback(ctx context.Context, input []agent.Message, observer agent.Observer, _ agent.ToolObserver) (agent.Result, error) {
+	return r.RunWithObserver(ctx, input, observer)
+}
+
 type citationToolRunner struct{}
 
 const citationToolResultContent = `{"data":{"results":[{"documentId":"doc-1","documentName":"Boiler Manual","knowledgeBaseId":"kb-1","chunkId":"chunk-7","sectionPath":"3.1","quoteText":"inspect the valve before startup","contentPreview":"inspect the valve before startup","context":"Operators inspect the valve before startup.","content":"FULL RAW DOCUMENT BODY MUST NOT LEAK","fullText":"FULL RAW DOCUMENT BODY MUST NOT LEAK EITHER","pageNumber":12,"score":0.91,"rerankScore":0.88,"chunkType":"paragraph","metadata":{"pageLabel":"12","objectKey":"secret","internalUrl":"http://internal/doc","vector":[0.1,0.2]}}]}}`
@@ -1085,6 +1101,75 @@ func TestAskSSEPayloadsDoNotLeakPromptRawToolOrProviderSecrets(t *testing.T) {
 		assertProgressPayloadsDoNotLeakSensitiveData(t, observed)
 		assertStreamPayloadsDoNotLeakSensitiveData(t, repository.savedEvents)
 	})
+}
+
+func TestAskEmitsReasoningDeltaBeforeAnswerDelta(t *testing.T) {
+	repository := &fakeRepository{conversation: Conversation{ID: "conversation-id", OwnerUserID: "user-id", Status: "active"}}
+	qa, err := NewQAService(repository, fakeRuntimeProvider{runner: reasoningDeltaRunner{reasoning: "I checked the public inspection summary."}, prompt: "system prompt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var observed []ProgressEvent
+	_, err = qa.Ask(context.Background(), "user-id", "conversation-id", AskInput{Message: "explain", Mode: "general_chat"}, func(event ProgressEvent) {
+		observed = append(observed, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reasoningSeq, answerSeq := 0, 0
+	var reasoningText string
+	for _, event := range repository.savedEvents {
+		switch event.EventType {
+		case "reasoning.delta":
+			reasoningSeq = event.EventSeq
+			reasoningText, _ = event.Payload["text"].(string)
+			if event.Payload["iterationNo"] != 1 {
+				t.Fatalf("reasoning payload=%+v, want iterationNo=1", event.Payload)
+			}
+		case "answer.delta":
+			answerSeq = event.EventSeq
+		}
+	}
+	if reasoningText != "I checked the public inspection summary." {
+		t.Fatalf("reasoning text=%q", reasoningText)
+	}
+	if reasoningSeq == 0 || answerSeq == 0 || reasoningSeq > answerSeq {
+		t.Fatalf("reasoningSeq=%d answerSeq=%d events=%+v", reasoningSeq, answerSeq, repository.savedEvents)
+	}
+	assertSSEEventTypesSeen(t, observed, "message.created", "agent.iteration.started", "reasoning.delta", "reasoning.step", "answer.delta", "answer.completed")
+	assertProgressPayloadsDoNotLeakSensitiveData(t, observed)
+	assertStreamPayloadsDoNotLeakSensitiveData(t, repository.savedEvents)
+}
+
+func TestAskDropsUnsafeReasoningDelta(t *testing.T) {
+	repository := &fakeRepository{conversation: Conversation{ID: "conversation-id", OwnerUserID: "user-id", Status: "active"}}
+	qa, err := NewQAService(repository, fakeRuntimeProvider{runner: reasoningDeltaRunner{reasoning: "system prompt with token=secret http://internal.provider/v1"}, prompt: "system prompt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var observed []ProgressEvent
+	_, err = qa.Ask(context.Background(), "user-id", "conversation-id", AskInput{Message: "explain", Mode: "general_chat"}, func(event ProgressEvent) {
+		observed = append(observed, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range repository.savedEvents {
+		if event.EventType == "reasoning.delta" {
+			t.Fatalf("unsafe reasoning.delta was emitted: %+v", event)
+		}
+	}
+	for _, event := range observed {
+		if event.Type == "reasoning.delta" {
+			t.Fatalf("unsafe reasoning.delta was observed: %+v", event)
+		}
+	}
+	assertSSEEventTypesSeen(t, observed, "message.created", "agent.iteration.started", "reasoning.step", "answer.delta", "answer.completed")
+	assertProgressPayloadsDoNotLeakSensitiveData(t, observed)
+	assertStreamPayloadsDoNotLeakSensitiveData(t, repository.savedEvents)
 }
 
 func TestAskEmitsCitationDeltaForFallbackAgentMessageCitations(t *testing.T) {

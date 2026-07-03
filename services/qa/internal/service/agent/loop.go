@@ -18,6 +18,7 @@ type EventType string
 
 const (
 	EventModelStarted   EventType = "model.started"
+	EventModelReasoning EventType = "model.reasoning.delta"
 	EventModelCompleted EventType = "model.completed"
 	EventToolStarted    EventType = "tool.started"
 	EventToolCompleted  EventType = "tool.completed"
@@ -26,15 +27,17 @@ const (
 )
 
 // Event intentionally excludes tool arguments, tool results, prompts, and
-// credentials. It is safe to adapt into logs or public progress summaries.
+// credentials. ReasoningContent may contain provider-supplied display text and
+// must be sanitized by the service layer before logs or public progress.
 type Event struct {
-	Type         EventType
-	Iteration    int
-	ToolCallID   string
-	ToolName     string
-	FinishReason string
-	Usage        TokenUsage
-	Err          error
+	Type             EventType
+	Iteration        int
+	ToolCallID       string
+	ToolName         string
+	FinishReason     string
+	ReasoningContent string
+	Usage            TokenUsage
+	Err              error
 }
 
 type Observer func(Event)
@@ -136,11 +139,26 @@ func (r *Runner) run(ctx context.Context, input []Message, observer Observer, to
 	messages := append([]Message(nil), input...)
 	for iteration := 1; iteration <= r.cfg.MaxIterations; iteration++ {
 		emit(observer, Event{Type: EventModelStarted, Iteration: iteration})
-		completion, err := r.model.Complete(ctx, messages, toolDefs)
+		emittedReasoning := false
+		modelCtx := WithReasoningDeltaObserver(ctx, func(delta string) {
+			if strings.TrimSpace(delta) == "" {
+				return
+			}
+			emittedReasoning = true
+			emit(observer, Event{Type: EventModelReasoning, Iteration: iteration, ReasoningContent: delta})
+		})
+		completion, err := r.model.Complete(modelCtx, messages, toolDefs)
 		if err != nil {
 			return Result{}, fmt.Errorf("complete model iteration %d: %w", iteration, err)
 		}
+		if strings.TrimSpace(completion.Message.ReasoningContent) != "" && !emittedReasoning {
+			emittedReasoning = true
+			emit(observer, Event{Type: EventModelReasoning, Iteration: iteration, ReasoningContent: completion.Message.ReasoningContent})
+		}
 		assistant := completion.Message
+		if emittedReasoning {
+			assistant.ReasoningContent = ""
+		}
 		if assistant.Role == "" {
 			assistant.Role = RoleAssistant
 		}
@@ -148,7 +166,7 @@ func (r *Runner) run(ctx context.Context, input []Message, observer Observer, to
 			return Result{}, fmt.Errorf("%w: expected assistant role, got %q", ErrInvalidResponse, assistant.Role)
 		}
 		messages = append(messages, assistant)
-		emit(observer, Event{Type: EventModelCompleted, Iteration: iteration, FinishReason: completion.FinishReason, Usage: completion.Usage})
+		emit(observer, Event{Type: EventModelCompleted, Iteration: iteration, FinishReason: completion.FinishReason, ReasoningContent: assistant.ReasoningContent, Usage: completion.Usage})
 
 		if len(assistant.ToolCalls) == 0 {
 			if strings.TrimSpace(assistant.Content) == "" {

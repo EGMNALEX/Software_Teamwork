@@ -339,6 +339,7 @@ QA 调用 Document 报告生成 MCP 工具后，只能通过脱敏后的 `report
 - `message.created` 事件用于创建消息和运行占位。
 - `agent.iteration.started` 事件用于展示 Agent 正在进入下一轮模型/工具循环。
 - `reasoning.step` 事件用于展示安全的处理步骤摘要，不展示私有 chain-of-thought。
+- `reasoning.delta` 事件用于展示 provider 明确返回的可公开 reasoning text；没有该字段时不发送，且不得包含私有 chain-of-thought、完整 prompt、工具原始参数/结果、凭据、内部 URL 或 provider 原始错误。
 - `tool.started`、`tool.completed`、`tool.failed` 事件用于展示脱敏后的工具调用状态。
 - `answer.delta` 事件用于最终回答文本增量。
 - `citation.delta` 事件用于问答引用。

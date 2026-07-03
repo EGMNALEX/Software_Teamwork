@@ -2853,14 +2853,22 @@ export interface components {
             requestId: string;
         };
         /** @enum {string} */
-        QASseEventType: "message.created" | "agent.iteration.started" | "reasoning.step" | "tool.started" | "tool.completed" | "tool.failed" | "answer.delta" | "citation.delta" | "answer.completed" | "error" | "heartbeat";
+        QASseEventType: "message.created" | "agent.iteration.started" | "reasoning.step" | "reasoning.delta" | "tool.started" | "tool.completed" | "tool.failed" | "answer.delta" | "citation.delta" | "answer.completed" | "error" | "heartbeat";
         QASseEvent: {
             eventSeq: number;
             eventType: components["schemas"]["QASseEventType"];
-            /** @description Event payload. `tool.completed` and `tool.failed` events may include `result.reportArtifact` with schema `QAReportArtifact`. */
+            /** @description Event payload. `reasoning.delta` uses `QAReasoningDeltaPayload`; `tool.completed` and `tool.failed` events may include `result.reportArtifact` with schema `QAReportArtifact`. */
             payload: components["schemas"]["JsonObject"];
             /** Format: date-time */
             createdAt: string;
+        };
+        QAReasoningDeltaPayload: {
+            responseRunId: string;
+            messageId: string;
+            iterationNo: number;
+            /** @description Provider-supplied display-safe reasoning text. Must not include system prompts, private chain-of-thought, tool raw parameters/results, credentials, internal URLs, provider raw errors, or complete prompts. */
+            text: string;
+            index?: number;
         };
         QASseEventListResponse: {
             data: components["schemas"]["QASseEvent"][];

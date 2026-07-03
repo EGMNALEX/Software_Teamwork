@@ -2102,7 +2102,7 @@ paths:
             text/event-stream:
               schema:
                 type: string
-                description: Server-Sent Events with event types `message.created`, `agent.iteration.started`, `reasoning.step`, `tool.started`, `tool.completed`, `tool.failed`, `answer.delta`, `citation.delta`, `answer.completed`, `error`, and optional `heartbeat`. For `tool.completed` and `tool.failed`, Document report-generation tools may include `payload.result.reportArtifact` using the `QAReportArtifact` schema.
+                description: Server-Sent Events with event types `message.created`, `agent.iteration.started`, `reasoning.step`, optional `reasoning.delta`, `tool.started`, `tool.completed`, `tool.failed`, `answer.delta`, `citation.delta`, `answer.completed`, `error`, and optional `heartbeat`. `reasoning.delta` carries provider-supplied display-safe reasoning text only and must not contain prompts, private chain-of-thought, tool raw data, credentials, internal URLs, or provider raw errors. For `tool.completed` and `tool.failed`, Document report-generation tools may include `payload.result.reportArtifact` using the `QAReportArtifact` schema.
         '400':
           $ref: '#/components/responses/Error'
         '403':
@@ -5883,6 +5883,7 @@ components:
       - message.created
       - agent.iteration.started
       - reasoning.step
+      - reasoning.delta
       - tool.started
       - tool.completed
       - tool.failed
@@ -5907,10 +5908,32 @@ components:
         payload:
           allOf:
           - $ref: '#/components/schemas/JsonObject'
-          description: Event payload. `tool.completed` and `tool.failed` events may include `result.reportArtifact` with schema `QAReportArtifact`.
+          description: Event payload. `reasoning.delta` uses `QAReasoningDeltaPayload`; `tool.completed` and `tool.failed` events may include `result.reportArtifact` with schema `QAReportArtifact`.
         createdAt:
           type: string
           format: date-time
+    QAReasoningDeltaPayload:
+      type: object
+      required:
+      - responseRunId
+      - messageId
+      - iterationNo
+      - text
+      properties:
+        responseRunId:
+          type: string
+        messageId:
+          type: string
+        iterationNo:
+          type: integer
+          minimum: 1
+        text:
+          type: string
+          maxLength: 4096
+          description: Provider-supplied display-safe reasoning text. Must not include system prompts, private chain-of-thought, tool raw parameters/results, credentials, internal URLs, provider raw errors, or complete prompts.
+        index:
+          type: integer
+          minimum: 0
     QASseEventListResponse:
       type: object
       required:
