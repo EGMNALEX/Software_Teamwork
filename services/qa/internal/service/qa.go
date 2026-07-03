@@ -34,6 +34,28 @@ const (
 
 const maxReasoningDeltaBytes = 4096
 
+var unsafeReasoningMarkers = []string{
+	"private_chain_of_thought",
+	"chain of thought",
+	"system prompt",
+	"raw mcp",
+	"tool arguments",
+	"api key",
+	"apikey",
+	"sk-",
+	"token=",
+	"bearer ",
+	"object key",
+	"objectkey",
+	"internal url",
+	"internalurl",
+	"http://internal",
+	"https://internal",
+	"provider raw",
+}
+
+var reasoningDeltaHoldbackRunes = maxReasoningMarkerRunes() - 1
+
 type AppError struct {
 	Code    Code
 	Message string
@@ -507,6 +529,21 @@ func (s *QAService) Ask(ctx context.Context, userID, conversationID string, inpu
 	onToolObservation := func(observation agent.ToolObservation) {
 		toolObservations[observation.ToolCallID] = observation
 	}
+	reasoningFilters := map[int]*reasoningDeltaFilter{}
+	emitReasoningSegments := func(iteration int, segments []string) {
+		for _, text := range segments {
+			if text == "" {
+				continue
+			}
+			emit("reasoning.delta", map[string]any{
+				"responseRunId": run.ID,
+				"messageId":     assistantMessage.ID,
+				"iterationNo":   iteration,
+				"text":          text,
+				"index":         iteration - 1,
+			})
+		}
+	}
 	seenCitationKeys := map[string]struct{}{}
 	emitSearchCitations := func(observation agent.ToolObservation) {
 		if observation.Type != agent.EventToolCompleted {
@@ -551,6 +588,9 @@ func (s *QAService) Ask(ctx context.Context, userID, conversationID string, inpu
 			iterationStartedAt[event.Iteration] = s.now().UTC()
 			emit("agent.iteration.started", map[string]any{"responseRunId": run.ID, "iterationNo": event.Iteration})
 		case agent.EventModelCompleted:
+			if filter := reasoningFilters[event.Iteration]; filter != nil {
+				emitReasoningSegments(event.Iteration, filter.Flush())
+			}
 			startedAt := iterationStartedAt[event.Iteration]
 			if startedAt.IsZero() {
 				startedAt = s.now().UTC()
@@ -583,15 +623,12 @@ func (s *QAService) Ask(ctx context.Context, userID, conversationID string, inpu
 				modelInvocationIDs[event.Iteration] = invocationID
 			}
 		case agent.EventModelReasoning:
-			if text := publicReasoningDeltaText(event.ReasoningContent); text != "" {
-				emit("reasoning.delta", map[string]any{
-					"responseRunId": run.ID,
-					"messageId":     assistantMessage.ID,
-					"iterationNo":   event.Iteration,
-					"text":          text,
-					"index":         event.Iteration - 1,
-				})
+			filter := reasoningFilters[event.Iteration]
+			if filter == nil {
+				filter = &reasoningDeltaFilter{}
+				reasoningFilters[event.Iteration] = filter
 			}
+			emitReasoningSegments(event.Iteration, filter.Add(event.ReasoningContent))
 		case agent.EventToolStarted:
 			observation := toolObservations[event.ToolCallID]
 			emit("tool.started", toolProgressPayload("正在执行工具 "+event.ToolName, event, observation, modelInvocationIDs[event.Iteration], false))
@@ -954,35 +991,49 @@ func emitProgress(observer ProgressObserver, event ProgressEvent) {
 	}
 }
 
-func publicReasoningDeltaText(value string) string {
-	text := strings.TrimSpace(value)
-	if text == "" || containsUnsafeReasoningContent(text) {
-		return ""
+type reasoningDeltaFilter struct {
+	pending string
+	blocked bool
+}
+
+func (f *reasoningDeltaFilter) Add(delta string) []string {
+	if f.blocked || delta == "" {
+		return nil
 	}
-	return truncateUTF8WithSuffix(text, maxReasoningDeltaBytes, "\n...[reasoning truncated]")
+	f.pending += delta
+	if containsUnsafeReasoningContent(f.pending) {
+		f.blocked = true
+		f.pending = ""
+		return nil
+	}
+	pendingRunes := []rune(f.pending)
+	if len(pendingRunes) <= reasoningDeltaHoldbackRunes {
+		return nil
+	}
+	emitRunes := len(pendingRunes) - reasoningDeltaHoldbackRunes
+	text := string(pendingRunes[:emitRunes])
+	f.pending = string(pendingRunes[emitRunes:])
+	return splitReasoningDeltaSegments(text)
+}
+
+func (f *reasoningDeltaFilter) Flush() []string {
+	if f.blocked || strings.TrimSpace(f.pending) == "" {
+		f.pending = ""
+		return nil
+	}
+	if containsUnsafeReasoningContent(f.pending) {
+		f.blocked = true
+		f.pending = ""
+		return nil
+	}
+	text := f.pending
+	f.pending = ""
+	return splitReasoningDeltaSegments(text)
 }
 
 func containsUnsafeReasoningContent(value string) bool {
 	normalized := strings.ToLower(value)
-	for _, marker := range []string{
-		"private_chain_of_thought",
-		"chain of thought",
-		"system prompt",
-		"raw mcp",
-		"tool arguments",
-		"api key",
-		"apikey",
-		"sk-",
-		"token=",
-		"bearer ",
-		"object key",
-		"objectkey",
-		"internal url",
-		"internalurl",
-		"http://internal",
-		"https://internal",
-		"provider raw",
-	} {
+	for _, marker := range unsafeReasoningMarkers {
 		if strings.Contains(normalized, marker) {
 			return true
 		}
@@ -990,19 +1041,44 @@ func containsUnsafeReasoningContent(value string) bool {
 	return false
 }
 
-func truncateUTF8WithSuffix(value string, maxBytes int, suffix string) string {
-	if maxBytes <= 0 || len(value) <= maxBytes {
-		return value
+func splitReasoningDeltaSegments(value string) []string {
+	if value == "" {
+		return nil
 	}
-	limit := maxBytes - len(suffix)
-	if limit <= 0 {
-		limit = maxBytes
-		suffix = ""
+	if maxReasoningDeltaBytes <= 0 {
+		return []string{value}
 	}
-	for limit > 0 && !utf8.ValidString(value[:limit]) {
-		limit--
+	segments := make([]string, 0, 1)
+	for value != "" {
+		if len(value) <= maxReasoningDeltaBytes {
+			segments = append(segments, value)
+			break
+		}
+		limit := maxReasoningDeltaBytes
+		for limit > 0 && !utf8.ValidString(value[:limit]) {
+			limit--
+		}
+		if limit == 0 {
+			_, size := utf8.DecodeRuneInString(value)
+			limit = size
+		}
+		segments = append(segments, value[:limit])
+		value = value[limit:]
 	}
-	return value[:limit] + suffix
+	return segments
+}
+
+func maxReasoningMarkerRunes() int {
+	maxRunes := 0
+	for _, marker := range unsafeReasoningMarkers {
+		if count := utf8.RuneCountInString(marker); count > maxRunes {
+			maxRunes = count
+		}
+	}
+	if maxRunes == 0 {
+		return 1
+	}
+	return maxRunes
 }
 
 func newID(prefix string) string {

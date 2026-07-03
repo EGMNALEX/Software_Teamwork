@@ -206,13 +206,20 @@ func (toolProgressRunner) RunWithToolResultCallback(ctx context.Context, input [
 
 type reasoningDeltaRunner struct {
 	reasoning string
+	chunks    []string
 }
 
 func (r reasoningDeltaRunner) RunWithObserver(_ context.Context, input []agent.Message, observer agent.Observer) (agent.Result, error) {
 	observer(agent.Event{Type: agent.EventModelStarted, Iteration: 1})
-	observer(agent.Event{Type: agent.EventModelReasoning, Iteration: 1, ReasoningContent: r.reasoning})
+	chunks := r.chunks
+	if len(chunks) == 0 {
+		chunks = []string{r.reasoning}
+	}
+	for _, chunk := range chunks {
+		observer(agent.Event{Type: agent.EventModelReasoning, Iteration: 1, ReasoningContent: chunk})
+	}
 	observer(agent.Event{Type: agent.EventModelCompleted, Iteration: 1, Usage: agent.TokenUsage{PromptTokens: 7, CompletionTokens: 4, ReasoningTokens: 3, TotalTokens: 14}})
-	final := agent.Message{Role: agent.RoleAssistant, Content: "reasoned answer", ReasoningContent: r.reasoning}
+	final := agent.Message{Role: agent.RoleAssistant, Content: "reasoned answer", ReasoningContent: strings.Join(chunks, "")}
 	return agent.Result{Final: final, Messages: append(input, final), Iterations: 1}, nil
 }
 
@@ -1119,12 +1126,15 @@ func TestAskEmitsReasoningDeltaBeforeAnswerDelta(t *testing.T) {
 	}
 
 	reasoningSeq, answerSeq := 0, 0
-	var reasoningText string
+	var reasoningText strings.Builder
 	for _, event := range repository.savedEvents {
 		switch event.EventType {
 		case "reasoning.delta":
-			reasoningSeq = event.EventSeq
-			reasoningText, _ = event.Payload["text"].(string)
+			if reasoningSeq == 0 {
+				reasoningSeq = event.EventSeq
+			}
+			text, _ := event.Payload["text"].(string)
+			reasoningText.WriteString(text)
 			if event.Payload["iterationNo"] != 1 {
 				t.Fatalf("reasoning payload=%+v, want iterationNo=1", event.Payload)
 			}
@@ -1132,8 +1142,8 @@ func TestAskEmitsReasoningDeltaBeforeAnswerDelta(t *testing.T) {
 			answerSeq = event.EventSeq
 		}
 	}
-	if reasoningText != "I checked the public inspection summary." {
-		t.Fatalf("reasoning text=%q", reasoningText)
+	if reasoningText.String() != "I checked the public inspection summary." {
+		t.Fatalf("reasoning text=%q", reasoningText.String())
 	}
 	if reasoningSeq == 0 || answerSeq == 0 || reasoningSeq > answerSeq {
 		t.Fatalf("reasoningSeq=%d answerSeq=%d events=%+v", reasoningSeq, answerSeq, repository.savedEvents)
@@ -1168,6 +1178,65 @@ func TestAskDropsUnsafeReasoningDelta(t *testing.T) {
 		}
 	}
 	assertSSEEventTypesSeen(t, observed, "message.created", "agent.iteration.started", "reasoning.step", "answer.delta", "answer.completed")
+	assertProgressPayloadsDoNotLeakSensitiveData(t, observed)
+	assertStreamPayloadsDoNotLeakSensitiveData(t, repository.savedEvents)
+}
+
+func TestAskDropsUnsafeReasoningDeltaSplitAcrossChunks(t *testing.T) {
+	repository := &fakeRepository{conversation: Conversation{ID: "conversation-id", OwnerUserID: "user-id", Status: "active"}}
+	qa, err := NewQAService(repository, fakeRuntimeProvider{runner: reasoningDeltaRunner{chunks: []string{"token", "=secret"}}, prompt: "system prompt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var observed []ProgressEvent
+	_, err = qa.Ask(context.Background(), "user-id", "conversation-id", AskInput{Message: "explain", Mode: "general_chat"}, func(event ProgressEvent) {
+		observed = append(observed, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range repository.savedEvents {
+		if event.EventType == "reasoning.delta" {
+			t.Fatalf("split unsafe reasoning.delta was emitted: %+v", event)
+		}
+	}
+	for _, event := range observed {
+		if event.Type == "reasoning.delta" {
+			t.Fatalf("split unsafe reasoning.delta was observed: %+v", event)
+		}
+	}
+	assertSSEEventTypesSeen(t, observed, "message.created", "agent.iteration.started", "reasoning.step", "answer.delta", "answer.completed")
+	assertProgressPayloadsDoNotLeakSensitiveData(t, observed)
+	assertStreamPayloadsDoNotLeakSensitiveData(t, repository.savedEvents)
+}
+
+func TestAskPreservesReasoningDeltaLeadingSpaces(t *testing.T) {
+	repository := &fakeRepository{conversation: Conversation{ID: "conversation-id", OwnerUserID: "user-id", Status: "active"}}
+	qa, err := NewQAService(repository, fakeRuntimeProvider{runner: reasoningDeltaRunner{chunks: []string{"I", " checked"}}, prompt: "system prompt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var observed []ProgressEvent
+	_, err = qa.Ask(context.Background(), "user-id", "conversation-id", AskInput{Message: "explain", Mode: "general_chat"}, func(event ProgressEvent) {
+		observed = append(observed, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reasoningText strings.Builder
+	for _, event := range repository.savedEvents {
+		if event.EventType != "reasoning.delta" {
+			continue
+		}
+		text, _ := event.Payload["text"].(string)
+		reasoningText.WriteString(text)
+	}
+	if reasoningText.String() != "I checked" {
+		t.Fatalf("reasoning delta text=%q, want preserved leading space", reasoningText.String())
+	}
+	assertSSEEventTypesSeen(t, observed, "message.created", "agent.iteration.started", "reasoning.delta", "reasoning.step", "answer.delta", "answer.completed")
 	assertProgressPayloadsDoNotLeakSensitiveData(t, observed)
 	assertStreamPayloadsDoNotLeakSensitiveData(t, repository.savedEvents)
 }
