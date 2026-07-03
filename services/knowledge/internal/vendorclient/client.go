@@ -369,6 +369,14 @@ func (c *Client) Ping(ctx context.Context) error {
 	return nil
 }
 
+func (c *Client) RuntimeStatus(ctx context.Context, userID string) (map[string]interface{}, error) {
+	var payload envelope
+	if err := c.getJSON(ctx, userID, "/api/v1/system/status", &payload); err != nil {
+		return nil, err
+	}
+	return decodeObject(payload.Data)
+}
+
 func (c *Client) getJSON(ctx context.Context, userID, path string, target *envelope) error {
 	return c.doJSON(ctx, userID, http.MethodGet, path, nil, target)
 }

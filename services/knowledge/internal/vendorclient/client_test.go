@@ -34,6 +34,8 @@ func TestClientUsesKnowledgeRuntimeContractPaths(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/system/ping":
 			_, _ = w.Write([]byte("pong"))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/system/status":
+			writeTestVendorJSON(w, `{"code":0,"data":{"redis":{"status":"green"},"task_executor_heartbeats":{"task_executor_common_1":[{"ts":1700000000}]}}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/datasets":
 			writeTestVendorJSON(w, `{"code":0,"data":[],"total_datasets":0}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/datasets/kb_1/documents" && r.URL.Query().Get("type") == "local":
@@ -72,6 +74,11 @@ func TestClientUsesKnowledgeRuntimeContractPaths(t *testing.T) {
 	if err := client.Ping(ctx); err != nil {
 		t.Fatalf("Ping: %v", err)
 	}
+	if status, err := client.RuntimeStatus(ctx, "tenant_1"); err != nil {
+		t.Fatalf("RuntimeStatus: %v", err)
+	} else if status["task_executor_heartbeats"] == nil {
+		t.Fatalf("RuntimeStatus missing task_executor_heartbeats: %#v", status)
+	}
 	if _, _, err := client.ListDatasets(ctx, "tenant_1", 2, 10); err != nil {
 		t.Fatalf("ListDatasets: %v", err)
 	}
@@ -96,6 +103,7 @@ func TestClientUsesKnowledgeRuntimeContractPaths(t *testing.T) {
 
 	expected := []call{
 		{method: http.MethodGet, path: "/api/v1/system/ping"},
+		{method: http.MethodGet, path: "/api/v1/system/status", tenant: "tenant_1", serviceToken: "runtime-token"},
 		{method: http.MethodGet, path: "/api/v1/datasets", query: "page=2&page_size=10", tenant: "tenant_1", serviceToken: "runtime-token"},
 		{method: http.MethodPost, path: "/api/v1/datasets/kb_1/documents", query: "type=local", tenant: "tenant_1", serviceToken: "runtime-token"},
 		{method: http.MethodPost, path: "/api/v1/datasets/kb_1/documents/parse", tenant: "tenant_1", serviceToken: "runtime-token"},

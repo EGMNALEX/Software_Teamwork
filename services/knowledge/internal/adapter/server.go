@@ -125,7 +125,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	vendorOK, vendorDetail := s.checkVendorRuntime(ctx)
+	vendorOK, vendorDetail := s.checkVendorRuntime(ctx, false)
 	statusCode := http.StatusOK
 	ready := "ok"
 	if !vendorOK {
@@ -142,7 +142,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRuntimeStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	vendorOK, vendorDetail := s.checkVendorRuntime(ctx)
+	vendorOK, vendorDetail := s.checkVendorRuntime(ctx, true)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"mode":               "adapter",
 		"environment":        s.cfg.Environment,
@@ -157,10 +157,138 @@ func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
 	writeAppError(w, r, service.NotFoundError("route not found"))
 }
 
-func (s *Server) checkVendorRuntime(ctx context.Context) (bool, map[string]any) {
+func (s *Server) checkVendorRuntime(ctx context.Context, includeInternal bool) (bool, map[string]any) {
 	pingURL := s.cfg.VendorRuntimeURL + "/api/v1/system/ping"
 	if err := s.vendor.Ping(ctx); err != nil {
-		return false, map[string]any{"url": pingURL, "error": err.Error()}
+		s.logger.WarnContext(ctx, "knowledge runtime ping failed",
+			"service", "knowledge-adapter",
+			"request_id", requestIDFromContext(ctx),
+			"error", err,
+		)
+		detail := map[string]any{
+			"status_code":          http.StatusServiceUnavailable,
+			"dependency":           "ping",
+			"error":                "vendor runtime unavailable",
+			"ingestion_diagnostic": "knowledge runtime API is unavailable",
+		}
+		if includeInternal {
+			detail["url"] = pingURL
+			detail["internal_error"] = err.Error()
+		}
+		return false, detail
 	}
-	return true, map[string]any{"url": pingURL, "status_code": http.StatusOK, "body": "pong"}
+	statusURL := s.cfg.VendorRuntimeURL + "/api/v1/system/status"
+	status, err := s.vendor.RuntimeStatus(ctx, s.runtimeStatusUserID())
+	if err != nil {
+		s.logger.WarnContext(ctx, "knowledge runtime status check failed",
+			"service", "knowledge-adapter",
+			"request_id", requestIDFromContext(ctx),
+			"error", err,
+		)
+		detail := map[string]any{
+			"status_code":          http.StatusServiceUnavailable,
+			"dependency":           "status",
+			"error":                "vendor runtime status unavailable",
+			"ingestion_diagnostic": "knowledge runtime status check failed",
+		}
+		if includeInternal {
+			detail["ping"] = map[string]any{"url": pingURL, "status_code": http.StatusOK, "body": "pong"}
+			detail["status_url"] = statusURL
+			detail["internal_error"] = err.Error()
+		} else {
+			detail["ping"] = map[string]any{"status_code": http.StatusOK, "body": "pong"}
+		}
+		return false, detail
+	}
+	statusOK, statusDetail := summarizeRuntimeStatus(status)
+	if includeInternal {
+		statusDetail["ping"] = map[string]any{"url": pingURL, "status_code": http.StatusOK, "body": "pong"}
+		statusDetail["status_url"] = statusURL
+	} else {
+		statusDetail["ping"] = map[string]any{"status_code": http.StatusOK, "body": "pong"}
+	}
+	return statusOK, statusDetail
+}
+
+func (s *Server) runtimeStatusUserID() string {
+	if userID := strings.TrimSpace(s.cfg.MCPUserID); userID != "" {
+		return userID
+	}
+	return "knowledge_adapter_ready"
+}
+
+func summarizeRuntimeStatus(status map[string]interface{}) (bool, map[string]any) {
+	dependencies := map[string]string{}
+	ok := true
+	for _, name := range []string{"doc_engine", "storage", "database", "redis"} {
+		value, exists := status[name]
+		if !exists {
+			continue
+		}
+		state := runtimeComponentStatus(value)
+		if state == "" {
+			continue
+		}
+		dependencies[name] = state
+		switch strings.ToLower(state) {
+		case "red", "timeout", "nok", "down":
+			ok = false
+		}
+	}
+
+	workerCount, taskExecutorReady := runtimeTaskExecutorReady(status["task_executor_heartbeats"])
+	if !taskExecutorReady {
+		ok = false
+	}
+	return ok, map[string]any{
+		"status_code":          http.StatusOK,
+		"dependencies":         dependencies,
+		"task_executor_count":  workerCount,
+		"task_executor_ready":  taskExecutorReady,
+		"ingestion_diagnostic": ingestionDiagnostic(taskExecutorReady, dependencies),
+	}
+}
+
+func runtimeComponentStatus(value any) string {
+	component, ok := value.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(toString(component["status"]))
+}
+
+func runtimeTaskExecutorReady(value any) (int, bool) {
+	heartbeats, ok := value.(map[string]interface{})
+	if !ok || len(heartbeats) == 0 {
+		return 0, false
+	}
+	count := 0
+	for _, raw := range heartbeats {
+		if entries, ok := raw.([]interface{}); ok && len(entries) > 0 {
+			count++
+		}
+	}
+	return count, count > 0
+}
+
+func ingestionDiagnostic(taskExecutorReady bool, dependencies map[string]string) string {
+	for name, state := range dependencies {
+		switch strings.ToLower(state) {
+		case "red", "timeout", "nok", "down":
+			return "knowledge runtime dependency " + name + " is " + state
+		}
+	}
+	if !taskExecutorReady {
+		return "knowledge runtime task executor heartbeat is missing; start services/knowledge-runtime/deploy/worker/run-local.sh"
+	}
+	return "ok"
+}
+
+func toString(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	default:
+		return ""
+	}
 }

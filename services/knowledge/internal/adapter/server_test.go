@@ -56,6 +56,116 @@ func TestReadyzVendorUnavailable(t *testing.T) {
 	}
 }
 
+func TestReadyzSanitizesRuntimeStatusErrors(t *testing.T) {
+	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/system/ping":
+			_, _ = w.Write([]byte("pong"))
+		case "/api/v1/system/status":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`<html>debug config VENDOR_RUNTIME_SERVICE_TOKEN=secret-token</html>`))
+		default:
+			t.Fatalf("unexpected vendor path %s", r.URL.Path)
+		}
+	}))
+	defer vendor.Close()
+
+	server := NewServer(adapterconfig.Config{
+		ServiceVersion:     "test",
+		VendorRuntimeURL:   vendor.URL,
+		ServiceToken:       testServiceToken,
+		VendorRuntimeToken: "runtime-token",
+	}, nil)
+
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, leaked := range []string{"secret-token", "<html>", vendor.URL, "internal_error", "status_url"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("readyz leaked %q in body: %s", leaked, body)
+		}
+	}
+	if !strings.Contains(body, "vendor runtime status unavailable") {
+		t.Fatalf("readyz body does not include sanitized dependency error: %s", body)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/runtime/status", nil)
+	req.Header.Set("X-Service-Token", testServiceToken)
+	rec = httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("runtime status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "internal_error") {
+		t.Fatalf("internal runtime status did not include diagnostic error: %s", rec.Body.String())
+	}
+}
+
+func TestReadyzRequiresRuntimeTaskExecutorHeartbeat(t *testing.T) {
+	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/system/ping":
+			_, _ = w.Write([]byte("pong"))
+		case "/api/v1/system/status":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"data":{"doc_engine":{"status":"green"},"storage":{"status":"green"},"database":{"status":"green"},"redis":{"status":"green"},"task_executor_heartbeats":{}}}`))
+		default:
+			t.Fatalf("unexpected vendor path %s", r.URL.Path)
+		}
+	}))
+	defer vendor.Close()
+
+	server := NewServer(adapterconfig.Config{
+		ServiceVersion:     "test",
+		VendorRuntimeURL:   vendor.URL,
+		ServiceToken:       testServiceToken,
+		VendorRuntimeToken: "runtime-token",
+	}, nil)
+
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "task_executor_ready") || !strings.Contains(rec.Body.String(), "run-local.sh") {
+		t.Fatalf("readyz body does not include task executor diagnostic: %s", rec.Body.String())
+	}
+}
+
+func TestReadyzAcceptsRuntimeTaskExecutorHeartbeat(t *testing.T) {
+	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/system/ping":
+			_, _ = w.Write([]byte("pong"))
+		case "/api/v1/system/status":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":0,"data":{"doc_engine":{"status":"green"},"storage":{"status":"green"},"database":{"status":"green"},"redis":{"status":"green"},"task_executor_heartbeats":{"task_executor_common_1":[{"ts":1700000000}]}}}`))
+		default:
+			t.Fatalf("unexpected vendor path %s", r.URL.Path)
+		}
+	}))
+	defer vendor.Close()
+
+	server := NewServer(adapterconfig.Config{
+		ServiceVersion:     "test",
+		VendorRuntimeURL:   vendor.URL,
+		ServiceToken:       testServiceToken,
+		VendorRuntimeToken: "runtime-token",
+	}, nil)
+
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"task_executor_ready":true`) {
+		t.Fatalf("readyz body does not include ready task executor: %s", rec.Body.String())
+	}
+}
+
 func TestListKnowledgeBasesRequiresAuth(t *testing.T) {
 	server := NewServer(adapterconfig.Config{
 		ServiceVersion:   "test",
